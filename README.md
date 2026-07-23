@@ -3,3 +3,4 @@ In this repository I test machine learning methodologies and apply them on data.
 # ML Concepts
 - Executed GridSearchCV with Random Forest on the Wine dataset.
 - Evaluated using ROC curves and AUC metrics.
+- Updated 23.07.2026
