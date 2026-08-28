@@ -33,6 +33,7 @@ df = pd.DataFrame({
     "ActualCost_MNOK": actual_cost
 })
 
+
 # Inject missing values (~6%) into GroundRiskIndex to simulate incomplete reports
 df.loc[np.random.rand(n_projects) < 0.06, "GroundRiskIndex"] = np.nan
 

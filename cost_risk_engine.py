@@ -1,63 +1,102 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.ensemble import GradientBoostingRegressor
+from typing import Dict, Tuple
 
-# ==========================================
-# 1. SIMULATE THE DATASET
-# ==========================================
-np.random.seed(42)
-n_samples = 500
+class SyntheticProjectDataGenerator:
+    """Generates synthetic historical project data with non-linear cost escalation."""
+    @staticmethod
+    def generate(n_samples: int = 200, random_state: int = 42) -> Tuple[pd.DataFrame, pd.Series]:
+        np.random.seed(random_state)
+        size_m2 = np.random.uniform(500, 10000, n_samples)
+        team_exp_years = np.random.uniform(1, 15, n_samples)
+        complexity_score = np.random.randint(1, 6, n_samples)
+        duration_months = size_m2 / 500 + np.random.uniform(2, 12, n_samples)
 
-# Generate features and target variable
-age = np.random.randint(18, 80, size=n_samples)
-total_charges = np.random.uniform(100, 8000, size=n_samples)
-churn = np.random.choice([0, 1], size=n_samples, p=[0.8, 0.2])
+        # Base cost formula ($ Millions)
+        base_cost = (size_m2 * 0.0012) + (complexity_score * 0.45) - (team_exp_years * 0.05)
+        
+        # Heteroscedastic noise (cost overrun risk increases with project size & complexity)
+        noise_scale = 0.10 + (size_m2 / 10000) * (complexity_score / 3.0)
+        cost_overrun_noise = np.random.gamma(shape=2.0, scale=noise_scale, size=n_samples)
+        
+        actual_cost = base_cost + cost_overrun_noise
 
-df = pd.DataFrame({
-    "Age": age,
-    "TotalCharges": total_charges,
-    "Churn": churn
-})
+        df = pd.DataFrame({
+            'size_m2': size_m2,
+            'team_exp_years': team_exp_years,
+            'complexity_score': complexity_score,
+            'duration_months': duration_months
+        })
+        return df, pd.Series(actual_cost, name='actual_cost_mUSD')
 
-# Introduce ~8% missing values into TotalCharges
-df.loc[np.random.rand(n_samples) < 0.08, "TotalCharges"] = np.nan
+class ProbabilisticCostEstimator:
+    """
+    Trains multiple quantile regressors to predict P10, P50, and P90 cost estimates
+    for project risk management.
+    """
+    def __init__(self, quantiles: list = [0.10, 0.50, 0.90]):
+        self.quantiles = quantiles
+        self.models: Dict[float, Pipeline] = {}
 
-# Separate features (X) and target (y)
-X = df.drop("Churn", axis=1)
-y = df["Churn"]
+    def _build_pipeline(self, quantile: float) -> Pipeline:
+        return Pipeline([
+            ('scaler', StandardScaler()),
+            ('regressor', GradientBoostingRegressor(
+                loss='quantile',
+                alpha=quantile,
+                n_estimators=100,
+                max_depth=3,
+                random_state=42
+            ))
+        ])
 
-# Train/Test Split (80% train, 20% test) with stratification
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        for q in self.quantiles:
+            pipeline = self._build_pipeline(q)
+            pipeline.fit(X, y)
+            self.models[q] = pipeline
+        return self
 
-# ==========================================
-# 2. BUILD THE MACHINE LEARNING PIPELINE
-# ==========================================
-# Sequential steps: Impute missing values -> Scale features -> Train KNN
-pipeline = Pipeline([
-    ("imputer", SimpleImputer(strategy="median")),
-    ("scaler", StandardScaler()),
-    ("knn", KNeighborsClassifier(n_neighbors=5))
-])
+    def predict_p_values(self, X: pd.DataFrame) -> pd.DataFrame:
+        predictions = {}
+        for q, model in self.models.items():
+            predictions[f'P{int(q*100)}'] = model.predict(X)
+        
+        results_df = pd.DataFrame(predictions, index=X.index)
+        
+        # Calculate Contingency Buffer required (P90 - P50)
+        results_df['Contingency_P90_Buffer'] = results_df['P90'] - results_df['P50']
+        return results_df
 
-# ==========================================
-# 3. TRAIN & EVALUATE THE MODEL
-# ==========================================
-# Fit the pipeline on training data
-pipeline.fit(X_train, y_train)
+if __name__ == "__main__":
+    # 1. Generate Training Data
+    X_train, y_train = SyntheticProjectDataGenerator.generate(n_samples=500)
 
-# Make predictions on test data
-y_pred = pipeline.predict(X_test)
+    # 2. Train Quantile Estimators (P10, P50, P90)
+    estimator = ProbabilisticCostEstimator(quantiles=[0.10, 0.50, 0.90])
+    estimator.fit(X_train, y_train)
 
-# Display evaluation diagnostics
-print("--- Confusion Matrix ---")
-print(confusion_matrix(y_test, y_pred))
+    # 3. Predict for a New Enterprise Project Scope
+    # Feature inputs: Size: 4,500 m2 | Team Exp: 3 yrs | Ground/Site Complexity: 4/5 | Duration: 14 mos
+    new_project = pd.DataFrame([{
+        'size_m2': 4500,
+        'team_exp_years': 3,
+        'complexity_score': 4,
+        'duration_months': 14
+    }])
 
-print("\n--- Classification Report ---")
-print(classification_report(y_test, y_pred))
+    cost_estimates = estimator.predict_p_values(new_project)
+
+    print("==================================================")
+    print("      PROJECT PROBABILISTIC COST ESTIMATE         ")
+    print("==================================================")
+    print(f"P10 Estimate (Optimistic) : ${cost_estimates['P10'].values[0]:.3f} M")
+    print(f"P50 Estimate (Median)     : ${cost_estimates['P50'].values[0]:.3f} M")
+    print(f"P90 Estimate (Conservative): ${cost_estimates['P90'].values[0]:.3f} M")
+    print("--------------------------------------------------")
+    print(f"Recommended Contingency Buffer (P90 - P50): ${cost_estimates['Contingency_P90_Buffer'].values[0]:.3f} M")
+    print("==================================================")
